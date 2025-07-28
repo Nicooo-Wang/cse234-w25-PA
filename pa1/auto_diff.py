@@ -540,8 +540,8 @@ class MatMulOp(Op):
     def gradient(self, node: Node, output_grad: Node) -> List[Node]:
         """Given gradient of matmul node, return partial adjoint to each input."""
         return [
-            matmul(output_grad, transpose(node.inputs[1], 0, 1)),
-            matmul(transpose(node.inputs[0], 0, 1), output_grad),
+            matmul(output_grad, transpose(node.inputs[1], -2, -1)),
+            matmul(transpose(node.inputs[0], -2, -1), output_grad),
         ]
 
 
@@ -556,14 +556,21 @@ class SoftmaxOp(Op):
             name=f"Softmax({node_A.name})",
         )
 
-    def compute(self, node: Node, input_values: List[torch.Tensor]) -> torch.Tensor:
+    def compute(self,node: Node, input_values: List[torch.Tensor]) -> torch.Tensor:
         """Return softmax of input along specified dimension."""
         assert len(input_values) == 1
-        """TODO: your code here"""
+        values_exp = torch.exp(input_values[0])
+        values_sum = torch.sum(values_exp, dim=node.attrs["dim"], keepdim=True)
+        return values_exp / values_sum
 
     def gradient(self, node: Node, output_grad: Node) -> List[Node]:
         """Given gradient of softmax node, return partial adjoint to input."""
-        """TODO: your code here"""
+        dim = node.attrs['dim']
+        softmax_output = node
+        # M x (G - M.T x G)
+        m_T_x_G = sum_op(mul(output_grad,node), dim=dim,keepdim=True)
+        right = output_grad - m_T_x_G
+        return [mul(node,right)]
 
 
 class LayerNormOp(Op):
@@ -580,14 +587,44 @@ class LayerNormOp(Op):
     def compute(self, node: Node, input_values: List[torch.Tensor]) -> torch.Tensor:
         """Return layer normalized input."""
         assert len(input_values) == 1
-        """TODO: your code here"""
+        mean = torch.mean(input_values[0], dim=(-1), keepdim=True)
+        var = torch.var(input_values[0], dim=(-1), keepdim=True,correction=0)
+        return (input_values[0] - mean) / torch.sqrt(var + node.attrs["eps"])
 
     def gradient(self, node: Node, output_grad: Node) -> List[Node]:
         """
         Given gradient of the LayerNorm node wrt its output, return partial 
         adjoint (gradient) wrt the input x.
         """
-        """TODO: your code here"""
+        x = node.inputs[0]
+        normalized_shape = node.attrs["normalized_shape"]
+        eps = node.attrs["eps"]
+
+        # Calculate normalized dimensions using the provided normalized_shape
+        normalized_dims = tuple(range(-len(normalized_shape), 0))  # (-k, -k+1, ..., -1)
+
+        # Symbolic mean computation using framework's mean op
+        x_mean = mean(x, dim=normalized_dims, keepdim=True)
+
+        # Symbolic variance computation
+        x_centered = x - x_mean
+        x_sq = x_centered * x_centered
+        var = mean(x_sq, dim=normalized_dims, keepdim=True)
+
+        # Symbolic standard deviation with epsilon
+        var_eps = var + eps
+        inv_std = div(ones_like(var), sqrt(var_eps))
+
+        # Gradient components
+        term1 = output_grad * inv_std
+        term2 = x_centered * power(inv_std, 3) * mean(output_grad * x_centered, 
+                                                    dim=normalized_dims, 
+                                                    keepdim=True)
+        term3 = inv_std * mean(output_grad, dim=normalized_dims, keepdim=True)
+
+        # Final gradient computation
+        grad_x = term1 - term2 - term3
+        return [grad_x]
 
 class ReLUOp(Op):
     """ReLU activation function."""
@@ -606,7 +643,8 @@ class ReLUOp(Op):
 
     def gradient(self, node: Node, output_grad: Node) -> List[Node]:
         """Given gradient of ReLU node, return partial adjoint to input."""
-        return [greater(node.inputs[0] , 0) * output_grad]
+        zero = zeros_like(node.inputs[0])
+        return [greater(node.inputs[0] , zero) * output_grad]
 
 class SqrtOp(Op):
     """Op to compute element-wise square root."""
