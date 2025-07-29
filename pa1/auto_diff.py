@@ -1,5 +1,7 @@
+from tkinter import Place
 from typing import Any, Dict, List, Set
 
+from numpy import ones
 import torch
 
 
@@ -92,7 +94,7 @@ class Op:
         """Create a new node with this current op.
 
         Returns
-        -------
+        ------G
         The created new node.
         """
         raise NotImplementedError
@@ -877,4 +879,21 @@ def gradients(output_node: Node, nodes: List[Node]) -> List[Node]:
     grad_nodes: List[Node]
         A list of gradient nodes, one for each input nodes respectively.
     """
-    """TODO: your code here"""
+    node_lists_topo = topological_sort(explore_graph([output_node]))
+    node_lists_topo = reversed(node_lists_topo)
+    known_values = {output_node: ones_like(output_node)}
+
+    # compute
+    for node_cur in node_lists_topo:
+        if node_cur.op == placeholder:
+            continue
+        if node_cur not in known_values:
+            raise ValueError(f"Node {node_cur} is not in known values.")
+        input_grads = node_cur.op.gradient(node_cur, known_values[node_cur])
+        for input_node,input_grad in zip(node_cur.inputs, input_grads):
+            if input_node not in known_values:
+                known_values[input_node] = input_grad
+            else:
+                known_values[input_node] += input_grad
+
+    return [known_values.get(node,zeros_like(node)) for node in nodes]
