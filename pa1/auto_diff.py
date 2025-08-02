@@ -49,6 +49,13 @@ class Node:
 
     def __rsub__(self, other):
         return (-1) * self + other
+    
+    def __matmul__(self, other):
+        if isinstance(other, Node):
+            return matmul(self, other)
+        else:
+            assert isinstance(other, (int, float))
+            return mul_by_const(self, other)
 
     def __mul__(self, other):
         if isinstance(other, Node):
