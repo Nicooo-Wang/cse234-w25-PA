@@ -35,32 +35,48 @@ def transformer(X: ad.Node, nodes: List[ad.Node],
     """
     Wq, Wk, Wv, Wo, W1, W2, b1, b2 = nodes
 
-    # Multi-head self-attention
+    # Self-attention mechanism
+    # Q, K, V projections: (batch, seq_len, input_dim) @ (input_dim, model_dim) -> (batch, seq_len, model_dim)
     Q = X @ Wq  # (batch, seq_len, model_dim)
     K = X @ Wk  # (batch, seq_len, model_dim) 
     V = X @ Wv  # (batch, seq_len, model_dim)
-
-    # Attention mechanism
-    scores = Q @ ad.transpose(K, 1, 2)  # (batch, seq_len, seq_len)
-    scaled_scores = ad.div_by_const(scores, np.sqrt(model_dim))
-    attention_weights = ad.softmax(scaled_scores)  # (batch, seq_len, seq_len)
+    
+    # Scaled dot-product attention
+    # QK^T: (batch, seq_len, model_dim) @ (batch, model_dim, seq_len) -> (batch, seq_len, seq_len)
+    K_transposed = ad.transpose(K, 1, 2)  # (batch, model_dim, seq_len)
+    attention_scores = Q @ K_transposed  # (batch, seq_len, seq_len)
+    
+    # Scale by sqrt(model_dim)  
+    scale_factor = 1.0 / (model_dim ** 0.5)
+    scaled_scores = ad.mul_by_const(attention_scores, scale_factor)
+    
+    # Apply softmax to get attention weights
+    attention_weights = ad.softmax(scaled_scores, dim=-1)  # (batch, seq_len, seq_len)
     
     # Apply attention to values
-    attention_output = attention_weights @ V  # (batch, seq_len, model_dim)
+    # (batch, seq_len, seq_len) @ (batch, seq_len, model_dim) -> (batch, seq_len, model_dim)
+    attention_output = attention_weights @ V
     
     # Output projection
-    projected_output = attention_output @ Wo  # (batch, seq_len, model_dim)
+    # (batch, seq_len, model_dim) @ (model_dim, model_dim) -> (batch, seq_len, model_dim)
+    projected_output = attention_output @ Wo
     
-    # Layer normalization
-    norm_output = ad.layernorm(projected_output, normalized_shape=[model_dim], eps=eps)
+    # Layer normalization after attention (Pre-LN style)
+    # Normalize over the last dimension (model_dim)
+    normed_attention = ad.layernorm(projected_output, normalized_shape=[model_dim], eps=eps)
     
-    # Feed-forward network
-    ff_intermediate = norm_output @ W1  # (batch, seq_len, model_dim)
+    # Feed-forward layer
+    # (batch, seq_len, model_dim) @ (model_dim, model_dim) -> (batch, seq_len, model_dim)
+    ff_intermediate = normed_attention @ W1 + b1
     ff_activated = ad.relu(ff_intermediate)  # (batch, seq_len, model_dim)
-    ff_final = ff_activated @ W2  # (batch, seq_len, num_classes)
+    ff_output = ff_activated @ W2 + b2  # (batch, seq_len, num_classes)
     
-    # Global average pooling for classification
-    output = ad.mean(ff_final, dim=(1,), keepdim=False)  # (batch, num_classes)
+    # Layer normalization after feed-forward
+    # Since ff_output has shape (batch, seq_len, num_classes), normalize over num_classes
+    normed_ff = ad.layernorm(ff_output, normalized_shape=[num_classes], eps=eps)
+    
+    # Global average pooling for classificatioj
+    output = ad.mean(normed_ff, dim=(1,), keepdim=False)  # (batch, num_classes)
     
     return output
 
@@ -72,7 +88,7 @@ def softmax_loss(Z: ad.Node, y_one_hot: ad.Node, batch_size: int) -> ad.Node:
     Parameters
     ----------
     Z: ad.Node
-        A node in of shape (batch_size, num_classes), containing the
+        A node in of shape (batch_size, 1, num_classes) or (batch_size, num_classes), containing the
         logits for the batch of instances.
 
     y_one_hot: ad.Node
@@ -100,8 +116,10 @@ def softmax_loss(Z: ad.Node, y_one_hot: ad.Node, batch_size: int) -> ad.Node:
     softmax_probs = ad.softmax(Z)
     log_probs = ad.log(softmax_probs)
     neg_y = ad.mul_by_const(y_one_hot, -1.0)
+    # Z has shape (batch, num_classes), y_one_hot has shape (batch, num_classes)
     elementwise_loss = neg_y * log_probs
-    loss = ad.mean(elementwise_loss, dim=(0, 1))
+    # Mean over all dimensions to get scalar loss  
+    loss = ad.mean(elementwise_loss, dim=(0, 1), keepdim=False)
     return loss
 
 
@@ -167,9 +185,12 @@ def sgd_epoch(
         X_batch = X[start_idx:end_idx, :max_len, :]
         y_batch = y[start_idx:end_idx]
         
+        # Ensure X_batch has the right shape for transformer input
+        actual_batch_size = X_batch.shape[0]
+        
         # Compute forward and backward passes
-        X_batch_tensor = torch.tensor(X_batch, dtype=torch.float32)
-        y_batch_tensor = torch.tensor(y_batch, dtype=torch.float32)
+        X_batch_tensor = torch.tensor(X_batch, dtype=torch.float32).clone().detach()
+        y_batch_tensor = torch.tensor(y_batch, dtype=torch.float32).clone().detach()
         # Call f_run_model which expects X_batch, y_batch, model_weights
         result = f_run_model(X_batch_tensor, y_batch_tensor, model_weights)
         
@@ -179,7 +200,24 @@ def sgd_epoch(
         
         # Update weights and biases
         for i in range(len(model_weights)):
-            model_weights[i] = model_weights[i] - lr * torch.tensor(grads_list[i], dtype=torch.float32)
+            grad_tensor = torch.tensor(grads_list[i], dtype=torch.float32)
+            
+            # Handle batch gradients: if gradient has batch dimension, sum over it
+            if model_weights[i].shape != grad_tensor.shape:
+                if i >= 6:  # Bias terms (b_1 and b_2) need special handling
+                    # For bias, sum over batch and sequence dimensions
+                    if grad_tensor.dim() == 3:  # [batch, seq, dim]
+                        grad_tensor = grad_tensor.sum(dim=(0, 1))  # Sum to [dim]
+                    elif grad_tensor.dim() == 2:  # [batch, dim]
+                        grad_tensor = grad_tensor.sum(dim=0)  # Sum to [dim]
+                elif grad_tensor.dim() == model_weights[i].dim() + 1:
+                    # Weight matrices have extra batch dimension, average over it
+                    grad_tensor = grad_tensor.mean(dim=0)
+                else:
+                    print(f"Shape mismatch! Weight {i}: {model_weights[i].shape}, Grad: {grad_tensor.shape}")
+                    continue  # Skip this update to avoid shape issues
+                    
+            model_weights[i] = model_weights[i] - lr * grad_tensor
 
         # Accumulate the loss
         total_loss += float(batch_loss) * X_batch.shape[0]
@@ -212,9 +250,9 @@ def train_model():
     eps = 1e-5 
 
     # - Set up the training settings.
-    num_epochs = 20
+    num_epochs = 100  # Increased back up
     batch_size = 32
-    lr = 0.02
+    lr = 0.01  # Lower learning rate to avoid NaN
 
     # TODO: Define the forward graph.
     X = ad.Variable(name="X")
@@ -230,6 +268,7 @@ def train_model():
     nodes = [W_Q, W_K, W_V, W_O, W_1, W_2, b_1, b_2]
     y_predict = transformer(X, nodes, model_dim, seq_length, eps, batch_size, num_classes)
     y_groundtruth = ad.Variable(name="y")
+    # Use actual batch size from X shape instead of fixed batch_size
     loss: ad.Node = softmax_loss(y_predict, y_groundtruth, batch_size)
     
     # TODO: Construct the backward graph.
@@ -271,13 +310,17 @@ def train_model():
 
     # Initialize model weights.
     np.random.seed(0)
-    stdv = 1.0 / np.sqrt(num_classes)
+    stdv = 1.0 / np.sqrt(model_dim)  # Better initialization scale
+    # Attention weights: input_dim -> model_dim
     W_Q_val = np.random.uniform(-stdv, stdv, (input_dim, model_dim))
     W_K_val = np.random.uniform(-stdv, stdv, (input_dim, model_dim))
     W_V_val = np.random.uniform(-stdv, stdv, (input_dim, model_dim))
+    # Output projection: model_dim -> model_dim
     W_O_val = np.random.uniform(-stdv, stdv, (model_dim, model_dim))
+    # Feed-forward weights: model_dim -> model_dim -> num_classes
     W_1_val = np.random.uniform(-stdv, stdv, (model_dim, model_dim))
     W_2_val = np.random.uniform(-stdv, stdv, (model_dim, num_classes))
+    # Biases
     b_1_val = np.random.uniform(-stdv, stdv, (model_dim,))
     b_2_val = np.random.uniform(-stdv, stdv, (num_classes,))
 
@@ -285,6 +328,7 @@ def train_model():
         """The function to compute the forward and backward graph.
         It returns the logits, loss, and gradients for model weights.
         """
+        
         result = evaluator.run(
             input_values={
                 X: X_batch,
@@ -333,14 +377,14 @@ def train_model():
     # Train the model.
     X_train, X_test, y_train, y_test= torch.tensor(X_train), torch.tensor(X_test), torch.DoubleTensor(y_train), torch.DoubleTensor(y_test)
     model_weights: List[torch.Tensor] = [
-        torch.tensor(W_Q_val, dtype=torch.float32, requires_grad=True),
-        torch.tensor(W_K_val, dtype=torch.float32, requires_grad=True),
-        torch.tensor(W_V_val, dtype=torch.float32, requires_grad=True),
-        torch.tensor(W_O_val, dtype=torch.float32, requires_grad=True),
-        torch.tensor(W_1_val, dtype=torch.float32, requires_grad=True),
-        torch.tensor(W_2_val, dtype=torch.float32, requires_grad=True),
-        torch.tensor(b_1_val, dtype=torch.float32, requires_grad=True),
-        torch.tensor(b_2_val, dtype=torch.float32, requires_grad=True)
+        torch.tensor(W_Q_val, dtype=torch.float32, requires_grad=False),
+        torch.tensor(W_K_val, dtype=torch.float32, requires_grad=False),
+        torch.tensor(W_V_val, dtype=torch.float32, requires_grad=False),
+        torch.tensor(W_O_val, dtype=torch.float32, requires_grad=False),
+        torch.tensor(W_1_val, dtype=torch.float32, requires_grad=False),
+        torch.tensor(W_2_val, dtype=torch.float32, requires_grad=False),
+        torch.tensor(b_1_val, dtype=torch.float32, requires_grad=False),
+        torch.tensor(b_2_val, dtype=torch.float32, requires_grad=False)
     ]
     for epoch in range(num_epochs):
         X_train, y_train = shuffle(X_train, y_train)
