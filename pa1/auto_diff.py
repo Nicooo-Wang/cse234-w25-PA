@@ -595,7 +595,8 @@ class SoftmaxOp(Op):
     def compute(self,node: Node, input_values: List[torch.Tensor]) -> torch.Tensor:
         """Return softmax of input along specified dimension."""
         assert len(input_values) == 1
-        values_exp = torch.exp(input_values[0])
+        max_num = torch.max(input_values[0], dim=node.attrs["dim"], keepdim=True).values
+        values_exp = torch.exp(input_values[0] - max_num)
         values_sum = torch.sum(values_exp, dim=node.attrs["dim"], keepdim=True)
         return values_exp / values_sum
 
