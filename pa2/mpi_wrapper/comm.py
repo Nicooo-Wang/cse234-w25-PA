@@ -73,7 +73,37 @@ class Communicator(object):
           - For non-root processes: one send and one receive.
           - For the root process: (n-1) receives and (n-1) sends.
         """
-        #TODO: Your code here
+        assert src_array.size == dest_array.size
+        src_array_byte = src_array.itemsize * src_array.size
+        # reduce
+        if self.Get_rank() == 0:
+            dest_array[:] = src_array[:]
+            tmp_arr = np.zeros_like(src_array)
+            for i in range(1, self.Get_size()):
+                self.comm.Recv(tmp_arr, i)
+                self.total_bytes_transferred += src_array_byte
+                if op == MPI.SUM:
+                    dest_array += tmp_arr
+                elif op == MPI.PROD:
+                    dest_array *= tmp_arr
+                elif op == MPI.MAX:
+                    dest_array[:] = np.maximum(dest_array, tmp_arr)
+                elif op == MPI.MIN:
+                    dest_array[:] = np.minimum(dest_array, tmp_arr)
+                else:
+                    raise Exception("fefe")
+        else:
+            self.comm.Send(src_array,0)
+            self.total_bytes_transferred += src_array_byte
+
+        # All
+        if self.Get_rank() == 0:
+            for i in range(1, self.Get_size()):
+                self.comm.Send(dest_array, i)
+                self.total_bytes_transferred += src_array_byte
+        else:
+            self.comm.Recv(dest_array,0)
+            self.total_bytes_transferred += src_array_byte
 
     def myAlltoall(self, src_array, dest_array):
         """
