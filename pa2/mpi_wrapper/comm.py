@@ -120,4 +120,38 @@ class Communicator(object):
             
         The total data transferred is updated for each pairwise exchange.
         """
-        #TODO: Your code here
+        rank = self.comm.Get_rank()
+        size = self.comm.Get_size()
+        
+        assert src_array.size % size == 0, "src_array size must be divisible by the number of processes"
+        assert dest_array.size % size == 0, "dest_array size must be divisible by the number of processes"
+
+        segment_size = src_array.size // size
+        segment_bytes = segment_size * src_array.itemsize
+        
+        np.copyto(dest_array[rank*segment_size:(rank+1)*segment_size], 
+                 src_array[rank*segment_size:(rank+1)*segment_size])
+        
+        num_requests = 2 * (size - 1) 
+        requests = [None] * num_requests
+        req_idx = 0
+        
+        segments = [(i*segment_size, (i+1)*segment_size) for i in range(size)]
+        
+        for i in range(size):
+            if i != rank:
+                start, end = segments[i]
+                recv_segment = dest_array[start:end]
+                requests[req_idx] = self.comm.Irecv(recv_segment, source=i)
+                req_idx += 1
+        
+        for i in range(size):
+            if i != rank:
+                start, end = segments[i]
+                send_segment = src_array[start:end]
+                requests[req_idx] = self.comm.Isend(send_segment, dest=i)
+                req_idx += 1
+        self.total_bytes_transferred += 2 * (size - 1) * segment_bytes
+        
+        if requests:
+            MPI.Request.Waitall(requests)
