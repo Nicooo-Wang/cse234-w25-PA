@@ -76,7 +76,16 @@ def naive_collect_forward_input(
     After gathering, the full input should have shape:
       (batch_size, seq_length, part_in_dim * mp_size)
     """
-    #TODO: Your code here
+    x = np.ascontiguousarray(x)
+    batch_size, seq_length, part_in_dim = x.shape
+    collected_x = np.empty(
+        (mp_size, batch_size, seq_length, part_in_dim), dtype=x.dtype
+    )
+    collected_x = np.ascontiguousarray(collected_x)
+    mp_comm.Allgather(x, collected_x)
+    collected_x = collected_x.transpose(1, 2, 0, 3).reshape(
+        batch_size, seq_length, part_in_dim * mp_size
+    )
     return collected_x
 
 
@@ -93,7 +102,15 @@ def naive_collect_forward_output(
     After gathering, the full output should have shape:
       (batch_size, seq_length, part_out_dim * mp_size)
     """
-    #TODO: Your code here
+    out = np.ascontiguousarray(out)
+    batch_size, seq_length, part_out_dim = out.shape
+    collected_out = np.empty(
+        (mp_size, batch_size, seq_length, part_out_dim), dtype=out.dtype
+    )
+    mp_comm.Allgather(out, collected_out)
+    collected_out = collected_out.transpose(1, 2, 0, 3).reshape(
+        batch_size, seq_length, part_out_dim * mp_size
+    )
     return collected_out
 
 def naive_collect_backward_output(
