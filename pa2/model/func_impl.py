@@ -49,7 +49,18 @@ def get_info(
     part_out_dim : int
         The partitioned output dimension for the FC layer.
     """
-    #TODO: Your code here
+    mp_idx = rank % mp_size
+    dp_idx = rank // mp_size
+
+    mp_comm = comm.Split(dp_idx, rank)
+    dp_comm = comm.Split(mp_idx, rank)
+
+    if fc_layer in ["fc_q", "fc_k", "fc_v"]:
+        part_in_dim = in_dim
+        part_out_dim = out_dim // mp_size
+    else:
+        part_in_dim = in_dim // mp_size
+        part_out_dim = out_dim
     return mp_idx, dp_idx, mp_comm, dp_comm, part_in_dim, part_out_dim
 
 def naive_collect_forward_input(
