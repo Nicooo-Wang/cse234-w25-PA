@@ -178,4 +178,23 @@ def naive_collect_backward_x(
         The reduced and scattered grad_x with shape 
         (batch_size, seq_length, in_dim // mp_size).
     """
-    #TODO: Your code here
+    batch_size, seq_length, in_dim = grad_x.shape
+
+    # Ensure in_dim is divisible by mp_size
+    assert in_dim % mp_size == 0, "in_dim is not divisible by mp_size"
+
+    # Compute the size of each shard
+    part_size = in_dim // mp_size
+
+    # Prepare buffer for Reduce-Scatter
+    send_buf = np.empty((mp_size, batch_size, seq_length, part_size), dtype=grad_x.dtype)
+    collected_grad_x = np.empty((batch_size, seq_length, part_size), dtype=grad_x.dtype)
+
+    # Distribute grad_x among mp_size chunks before Reduce-Scatter
+    for i in range(mp_size):
+        send_buf[i] = grad_x[:, :, i * part_size : (i + 1) * part_size]
+
+    # Perform Reduce-Scatter across model parallel ranks
+    mp_comm.Reduce_scatter(sendbuf=send_buf, recvbuf=collected_grad_x)
+
+    return collected_grad_x
