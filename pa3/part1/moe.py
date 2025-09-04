@@ -87,9 +87,12 @@ class ShardedLinear:
             return np.zeros((0, self.out_features_global))
 
         # Create a buffer for the full output
-        result = np.zeros((x.shape[0], self.out_features_global), dtype=np.float32)
 
-        # TODO: Produce the result of sharded linear layer.
+        result_local = x @ self.weight
+        result_list = mpi.allgather(result_local)
+        result = np.stack(result_list)
+        result = np.moveaxis(result,0,-1)
+        result = result.reshape(*result.shape[:-2],-1)
 
         return result
 
@@ -164,7 +167,14 @@ class MoE_TP:
         # TODO: Implement the TP-style MoE forward pass.
         # 1. Compute the routing indices and gates for each input
         indices, gates = self.router(x, self.topk)
-        # 2. Process experts parallel with TP style. 
+        # (batch_size, topk)
+        # 2. Process experts parallel with TP style.
+        for expert_idx in range(self.num_experts):
+            expert_mask = ( indices==expert_idx ).any(-1) # (batch_size, ) bool
+            if expert_mask.any():
+                expert_weights = gates[indices == expert_idx].sum(axis=-1) # (batch_size, )
+                expert_output = self.experts[expert_idx](x[expert_mask]) # (batch_size, )
+                outputs[expert_mask] += expert_output * expert_weights
 
         return outputs
 
@@ -284,8 +294,14 @@ class MoE_EP:
         indices, gates = self.router(x, self.topk)
 
         # 2. Process local inputs with this expert (within the device)
+        expert_mask = (indices == self.rank).any(-1) # (batch_size, ) bool
+        if expert_mask.any():
+            expert_weights = gates[indices==self.rank].sum(axis=-1)
+            expert_output = self.expert(x[expert_mask])
+            outputs[expert_mask] += expert_output * expert_weights
 
         # 3. Communicate between devices to get the outputs from all experts
+        mpi.allreduce(outputs)
 
         # 4. Return the outputs
 
