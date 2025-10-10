@@ -59,7 +59,31 @@ def get_optimal_N_D_from_cost(cost_budget):
         training_budget_flops: Effective total training FLOPs (in FLOPs)
         best_gpu: name of the selected GPU (one of 'A100', 'V100', 'T4')
     """
-    #TODO you code here
+    gpu_info = {
+        "A100": {"cost": 4.0, "TFLOPs": 312},
+        "V100": {"cost": 2.5, "TFLOPs": 125},
+        "T4": {"cost": 1.0, "TFLOPs": 65},
+    }
+    MFU = 0.4
+
+    best_gpu = ""
+    best_tflops_per_dollar = 0.0
+    for gpu, info in gpu_info.items():
+        cost = info["cost"]
+        flops = info["TFLOPs"]
+        tflops_per_dollar = flops * MFU / cost
+        if tflops_per_dollar > best_tflops_per_dollar:
+            best_tflops_per_dollar = tflops_per_dollar
+            best_gpu = gpu
+
+    best_cost = gpu_info[best_gpu]["cost"]
+    best_flops = gpu_info[best_gpu]["TFLOPs"]
+
+    total_hours = cost_budget / best_cost
+    C = total_hours * 3600 * best_flops * MFU * 1e12  # FLOPs
+    N = int((0.34 * 406.4 * C**0.29 / (410.7 * 6**0.29 * 0.29)) ** (1 / 0.63))
+    D = int(C / (6 * N))
+    training_budget_flops = C
 
     return N, D, training_budget_flops, best_gpu
 
